@@ -1,0 +1,56 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      # The release version is the <Version> in the project file. Bump it in a PR; merging publishes the release.
+      - name: Read version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = ([xml](Get-Content src/LgTvMonitor/LgTvMonitor.csproj)).Project.PropertyGroup.Version | Where-Object { $_ } | Select-Object -First 1
+          "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Publish
+        run: dotnet publish src/LgTvMonitor -c Release -o publish
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; }
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" installer/LgTvMonitor.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LgTvMonitor
+          path: |
+            publish/LgTvMonitor.exe
+            publish/LgTvMonitor-Setup.exe
+
+      - name: Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ steps.ver.outputs.version }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then echo "$TAG is already released; bump <Version> to publish a new one."; exit 0; fi
+          gh release create "$TAG" publish/LgTvMonitor-Setup.exe publish/LgTvMonitor.exe \
+            --target "$GITHUB_SHA" --title "LG TV Monitor $TAG" --generate-notes
